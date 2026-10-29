@@ -1,0 +1,11 @@
+[server]
+# Strava exports can be large; increase the default upload limit for local use.
+maxUploadSize = 2048
+
+[theme]
+base = "light"
+primaryColor = "#087f75"
+backgroundColor = "#f4f7fb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#14213d"
+font = "sans serif"
