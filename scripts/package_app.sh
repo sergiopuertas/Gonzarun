@@ -14,6 +14,7 @@ zip -r "$OUTPUT" \
   .streamlit/config.toml \
   running_dashboard \
   scripts/refresh_db.sh \
+  launchers \
   -x '*/__pycache__/*' '*.pyc'
 
 printf 'Paquete creado: %s\n' "$OUTPUT"

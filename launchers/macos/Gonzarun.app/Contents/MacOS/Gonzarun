@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+VENV="$PROJECT_ROOT/.venv"
+PYTHON="$VENV/bin/python"
+PORT="${GONZARUN_PORT:-8501}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    osascript -e 'display dialog "Gonzarun necesita Python 3.12 o superior. Instálalo desde python.org y vuelve a abrir la app." buttons {"OK"} with icon stop'
+    exit 1
+fi
+
+if [ ! -x "$PYTHON" ]; then
+    python3 -m venv "$VENV"
+    "$PYTHON" -m pip install --upgrade pip >/tmp/gonzarun-install.log 2>&1
+    "$PYTHON" -m pip install -r "$PROJECT_ROOT/requirements.txt" >>/tmp/gonzarun-install.log 2>&1
+fi
+
+(
+    cd "$PROJECT_ROOT"
+    "$PYTHON" -m streamlit run app.py --server.headless true --server.port "$PORT" \
+        >/tmp/gonzarun-streamlit.log 2>&1
+) &
+
+for _ in $(seq 1 30); do
+    if curl --silent --fail "http://127.0.0.1:$PORT/_stcore/health" >/dev/null; then
+        open "http://127.0.0.1:$PORT"
+        exit 0
+    fi
+    sleep 1
+done
+
+osascript -e 'display dialog "Gonzarun no ha podido iniciar. Consulta /tmp/gonzarun-install.log y /tmp/gonzarun-streamlit.log." buttons {"OK"} with icon stop'
+exit 1

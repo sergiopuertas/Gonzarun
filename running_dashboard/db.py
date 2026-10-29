@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, Float, Text, ForeignKey,
-    UniqueConstraint, Index, create_engine, event, select, text,
+    UniqueConstraint, Index, create_engine, delete, event, select, text,
 )
 from sqlalchemy.engine import Engine
 from dotenv import load_dotenv
@@ -99,6 +99,14 @@ def get_engine() -> Engine:
 
 def init_db() -> None:
     metadata.create_all(get_engine())
+
+
+def clear_database() -> None:
+    """Delete imported activities, GPS points, and import metadata."""
+    with get_engine().begin() as conn:
+        conn.execute(delete(activity_points))
+        conn.execute(delete(activities))
+        conn.execute(delete(import_state))
 
 
 def get_table_df(table: Table):

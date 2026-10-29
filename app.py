@@ -16,10 +16,11 @@ from streamlit_folium import st_folium
 from running_dashboard.analytics import (
     activity_family, compute_segment_records, ensure_activity_columns, format_pace,
     haversine_m, is_running_type, monthly_summary, pace_min_km, prepare_points,
-    seconds_to_hms,
+    seconds_to_hms, heart_rate_analysis,
 )
 from running_dashboard.db import (
-    PROJECT_ROOT, activities, activity_points, get_engine, get_table_df, init_db,
+    PROJECT_ROOT, activities, activity_points, clear_database, get_engine,
+    get_table_df, init_db,
 )
 from running_dashboard.ingest import run_import
 from running_dashboard.strava_zip import prepare_strava_zip
@@ -145,7 +146,7 @@ def cached_points_for_records(activity_ids: tuple[str, ...]) -> pd.DataFrame:
             statement = select(
                 activity_points.c.activity_id, activity_points.c.point_index, activity_points.c.timestamp,
                 activity_points.c.latitude, activity_points.c.longitude, activity_points.c.distance_m,
-                activity_points.c.altitude_m,
+                activity_points.c.altitude_m, activity_points.c.heart_rate, activity_points.c.speed_mps,
             ).where(activity_points.c.activity_id.in_(subset))
             results.append(pd.read_sql(statement, conn))
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
@@ -460,6 +461,146 @@ def render_evolution(df: pd.DataFrame) -> None:
         st.dataframe(display[["Mes", "Km", "Sesiones", "Horas", "Desnivel (m)", "Ritmo medio"]].round(1), use_container_width=True, hide_index=True)
 
 
+def render_physiology(df: pd.DataFrame, key_suffix: str = "root") -> None:
+    st.markdown("<div class='section-kicker'>Fisiología</div><h2>Frecuencia cardíaca y respuesta al esfuerzo</h2><p class='section-lead'>Estimaciones basadas en las muestras de FC y velocidad de tus recorridos GPS. Ajusta tu FC máxima para que las zonas sean personales.</p>", unsafe_allow_html=True)
+    if df.empty:
+        st.info("No hay actividades con los filtros actuales.")
+        return
+    families = [family for family in ["Correr", "Bici", "Natación", "Andar", "Otros"] if family in set(df["activity_family"])]
+    if len(families) > 1:
+        tabs = st.tabs(families)
+        for tab, family in zip(tabs, families):
+            with tab:
+                render_physiology(df[df["activity_family"] == family].copy(), key_suffix=family.casefold())
+        return
+    render_physiology_for_selection(df, key_suffix=key_suffix)
+
+
+def render_physiology_for_selection(df: pd.DataFrame, key_suffix: str) -> None:
+    if df.empty:
+        st.info("No hay actividades con los filtros actuales.")
+        return
+    gps_ids = tuple(sorted(set(df["activity_id"].dropna().astype(str)) & set(cached_gps_activity_ids())))
+    points = cached_points_for_records(gps_ids)
+    if points.empty or "heart_rate" not in points or "timestamp" not in points:
+        st.info("No hay recorridos con muestras de frecuencia cardíaca y fecha disponibles.")
+        return
+    valid_points = points[
+        pd.to_numeric(points["heart_rate"], errors="coerce").between(30, 240)
+        & pd.to_datetime(points["timestamp"], errors="coerce", utc=True).notna()
+    ]
+    valid_ids = set(valid_points["activity_id"].dropna().astype(str))
+    choices = df[df["activity_id"].astype(str).isin(valid_ids)].drop_duplicates("activity_id")
+    choices = choices.sort_values("activity_date", ascending=False, na_position="last").copy()
+    if choices.empty:
+        st.info("No hay recorridos con muestras de frecuencia cardíaca y fecha disponibles.")
+        return
+
+    def label(aid: str) -> str:
+        row = choices.loc[choices["activity_id"].astype(str) == str(aid)].iloc[0]
+        date = row["activity_date"].strftime("%d/%m/%Y") if pd.notna(row["activity_date"]) else "sin fecha"
+        return f"{row['activity_name']} · {date}"
+
+    selected_id = st.selectbox(
+        "Carrera para el análisis detallado",
+        ["Todas las actividades"] + choices["activity_id"].astype(str).tolist(),
+        format_func=lambda aid: "Resumen de la disciplina" if aid == "Todas las actividades" else label(aid),
+        key=f"physiology_activity_{key_suffix}",
+    )
+    selected_df = df if selected_id == "Todas las actividades" else df[df["activity_id"].astype(str) == selected_id].copy()
+    render_physiology_analysis(selected_df, key_suffix=key_suffix)
+
+
+def render_physiology_analysis(df: pd.DataFrame, key_suffix: str) -> None:
+    if df.empty:
+        st.info("No hay actividades con datos para analizar.")
+        return
+    gps_ids = tuple(sorted(set(df["activity_id"].dropna().astype(str)) & set(cached_gps_activity_ids())))
+    if not gps_ids:
+        st.info("No hay recorridos GPS con frecuencia cardíaca para calcular estas métricas.")
+        return
+    observed_max = df["max_hr"].dropna()
+    default_max = int(round(float(observed_max.max()))) if not observed_max.empty else 190
+    max_hr = st.slider(
+        "FC máxima de referencia (bpm)",
+        150,
+        230,
+        min(230, max(150, default_max)),
+        key=f"physiology_max_hr_{key_suffix}",
+    )
+    st.caption("Zonas usadas: Z1 <60%, Z2 60–70%, Z3 70–80%, Z4 80–90%, Z5 ≥90% de la FC máxima. Aeróbico = hasta 80%; anaeróbico = desde 90%.")
+    with st.spinner("Analizando muestras de FC y velocidad…"):
+        points = cached_points_for_records(gps_ids)
+        analysis = heart_rate_analysis(points, max_hr)
+    zones = analysis["zones"]
+    states = analysis["states"]
+    if zones.empty:
+        st.warning("Hay GPS, pero no suficientes muestras válidas de frecuencia cardíaca.")
+        return
+
+    left, right = st.columns([1.1, 1])
+    with left:
+        zone_display = zones.copy()
+        zone_display["Tiempo"] = zone_display["minutes"].map(seconds_to_hms)
+        zone_display["Porcentaje"] = zone_display["percent"].map(lambda value: f"{value:.1f} %")
+        st.markdown("#### Tiempo por zona de frecuencia cardíaca")
+        st.dataframe(zone_display[["zone", "Tiempo", "Porcentaje"]].rename(columns={"zone": "Zona"}), use_container_width=True, hide_index=True)
+    with right:
+        plot = zones.copy()
+        fig = px.bar(plot, x="zone", y="minutes", color="zone", title="Distribución del tiempo por zona", labels={"zone": "Zona", "minutes": "Minutos"}, color_discrete_sequence=["#9bd8cf", "#4fb3a7", "#087f75", "#f59e0b", "#dc2626"])
+        fig.update_layout(showlegend=False)
+        apply_plot_style(fig, 330)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### Velocidad en estado aeróbico y anaeróbico")
+    state_display = states.dropna(subset=["seconds"]).copy()
+    state_display["Tiempo total"] = state_display["minutes"].map(lambda value: f"{value:.1f} min")
+    state_display["Tiempo medio por actividad"] = state_display["avg_minutes_per_activity"].map(lambda value: f"{value:.1f} min" if pd.notna(value) else "—")
+    state_display["Velocidad media"] = state_display["avg_speed_kmh"].map(lambda value: f"{value:.1f} km/h" if pd.notna(value) else "—")
+    state_display["Velocidad mediana"] = state_display["median_speed_kmh"].map(lambda value: f"{value:.1f} km/h" if pd.notna(value) else "—")
+    state_display["FC media"] = state_display["avg_hr"].map(lambda value: f"{value:.0f} bpm" if pd.notna(value) else "—")
+    st.dataframe(state_display[["state", "Tiempo total", "Tiempo medio por actividad", "Velocidad media", "Velocidad mediana", "FC media"]].rename(columns={"state": "Estado"}), use_container_width=True, hide_index=True)
+
+    drift = analysis["drift"]
+    stabilization = analysis["stabilization"]
+    drift_col, stable_col = st.columns(2)
+    with drift_col:
+        st.markdown("#### ¿Sube la FC manteniendo velocidad?")
+        if not drift.empty:
+            drift_valid = drift.dropna(subset=["delta_bpm"])
+            mean_delta = drift_valid["delta_bpm"].mean()
+            st.metric("Cambio medio de FC a velocidad comparable", f"{mean_delta:+.1f} bpm" if pd.notna(mean_delta) else "—")
+            st.caption("Compara la primera y segunda mitad de cada actividad dentro de una banda de velocidad similar. Un valor positivo sugiere deriva cardíaca.")
+            chart = drift_valid.sort_values("delta_bpm").tail(20).copy()
+            activity_labels = df.drop_duplicates("activity_id").set_index("activity_id").apply(
+                lambda row: f"{row['activity_name']} · {row['activity_date'].strftime('%d/%m/%Y') if pd.notna(row['activity_date']) else 'sin fecha'}",
+                axis=1,
+            )
+            chart["actividad"] = chart["activity_id"].map(activity_labels).fillna("Recorrido sin identificar")
+            fig = px.bar(chart, x="delta_bpm", y="actividad", orientation="h", title="Deriva cardíaca por actividad", labels={"delta_bpm": "Cambio de FC (bpm)", "actividad": "Recorrido"})
+            fig.add_vline(x=0, line_color="#14213d")
+            apply_plot_style(fig, 340)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No hay suficientes muestras con velocidad comparable para estimar la deriva.")
+    with stable_col:
+        st.markdown("#### Tiempo para estabilización")
+        stable = stabilization.dropna(subset=["seconds"])
+        if not stable.empty:
+            st.metric("Mediana hasta estabilizar", seconds_to_hms(stable["seconds"].median()))
+            st.caption("Primera ventana móvil de 60 s con desviación de FC ≤5 bpm. Es una estimación y depende de la calidad del sensor.")
+            stable_display = stable.copy()
+            stable_display["Estabilización"] = stable_display["seconds"].map(seconds_to_hms)
+            activity_labels = df.drop_duplicates("activity_id").set_index("activity_id").apply(
+                lambda row: f"{row['activity_name']} · {row['activity_date'].strftime('%d/%m/%Y') if pd.notna(row['activity_date']) else 'sin fecha'}",
+                axis=1,
+            )
+            stable_display["Recorrido"] = stable_display["activity_id"].map(activity_labels).fillna("Recorrido sin identificar")
+            st.dataframe(stable_display[["Recorrido", "Estabilización"]], use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay suficientes puntos para estimar la estabilización de la FC.")
+
+
 def render_records(df: pd.DataFrame) -> None:
     st.markdown("### Marcas personales y mejores sesiones")
     if df.empty:
@@ -522,7 +663,7 @@ def render_gps(df: pd.DataFrame) -> None:
     choices = choices.drop_duplicates("activity_id").sort_values("activity_date", ascending=False, na_position="last")
     st.markdown("### Explora tus carreras con GPS")
     if choices.empty:
-        st.warning("No hay actividades con GPS para los filtros seleccionados. Comprueba que activity_points.csv esté importado y que sus IDs coincidan con activities.csv.")
+        st.warning("No hay actividades con GPS para los filtros seleccionados. Comprueba que activity_points.csv esté importado y que sus recorridos coincidan con las actividades.")
         return
     def label(aid: str) -> str:
         row = choices.loc[choices["activity_id"].astype(str) == str(aid)].iloc[0]
@@ -746,6 +887,35 @@ def render_data(df: pd.DataFrame) -> None:
     st.download_button("Descargar selección de actividades", data=display.to_csv(index=False).encode("utf-8-sig"), file_name="activities_filtradas.csv", mime="text/csv")
 
 
+def render_database_reset() -> None:
+    reset_state_key = "database_reset_pending"
+    if reset_state_key not in st.session_state:
+        st.session_state[reset_state_key] = False
+    st.markdown("#### Mantenimiento")
+    st.caption("Borra las actividades, los puntos GPS y el estado de importación de esta instalación. El ZIP guardado no se elimina.")
+    if not st.session_state[reset_state_key]:
+        if st.button("Borrar base de datos", type="secondary", key="open_database_reset"):
+            st.session_state[reset_state_key] = True
+            st.rerun()
+    else:
+        st.warning("Esta acción no se puede deshacer. Tendrás que volver a subir un ZIP de Strava para recuperar las estadísticas.")
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Sí, borrar todos los datos", type="primary", key="confirm_database_reset_button"):
+                try:
+                    clear_database()
+                    st.cache_data.clear()
+                    st.session_state[reset_state_key] = False
+                    st.success("Base de datos borrada. Ya puedes importar un nuevo ZIP desde esta app.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se ha podido borrar la base de datos: {exc}")
+        with cancel_col:
+            if st.button("Cancelar", key="cancel_database_reset"):
+                st.session_state[reset_state_key] = False
+                st.rerun()
+
+
 # ---------- App boot ----------
 init_db()
 
@@ -755,9 +925,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+render_database_reset()
+
 page = st.radio(
     "Sección del dashboard",
-    ["Importar datos", "Resumen", "Carreras", "Evolución", "Récords", "Explorar GPS", "Datos"],
+    ["Importar datos", "Resumen", "Carreras", "Fisiología", "Evolución", "Récords", "Explorar GPS", "Datos"],
     horizontal=True,
     label_visibility="collapsed",
 )
@@ -828,6 +1000,8 @@ if page == "Resumen":
     render_summary(filtered, summary)
 elif page == "Carreras":
     render_selected_runs(filtered)
+elif page == "Fisiología":
+    render_physiology(filtered)
 elif page == "Evolución":
     render_evolution(filtered)
 elif page == "Récords":

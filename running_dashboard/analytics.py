@@ -184,3 +184,79 @@ def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
         avg_pace=("pace_min_km", "mean"),
     ).reset_index()
     return grouped.sort_values("month")
+
+
+def heart_rate_analysis(points: pd.DataFrame, max_hr: float) -> dict[str, pd.DataFrame | float | None]:
+    """Summarize HR zones, intensity speeds, drift, and stabilization from GPS samples."""
+    if points.empty or not max_hr or max_hr <= 0:
+        return {"zones": pd.DataFrame(), "states": pd.DataFrame(), "drift": pd.DataFrame(), "stabilization": pd.DataFrame()}
+    df = prepare_points(points).copy()
+    required = {"heart_rate", "timestamp_parsed"}
+    if not required.issubset(df.columns):
+        return {"zones": pd.DataFrame(), "states": pd.DataFrame(), "drift": pd.DataFrame(), "stabilization": pd.DataFrame()}
+    df["heart_rate"] = pd.to_numeric(df["heart_rate"], errors="coerce")
+    df["speed_kmh"] = pd.to_numeric(df.get("speed_mps"), errors="coerce") * 3.6
+    df = df[df["heart_rate"].between(30, 240) & df["timestamp_parsed"].notna()].copy()
+    if df.empty:
+        return {"zones": pd.DataFrame(), "states": pd.DataFrame(), "drift": pd.DataFrame(), "stabilization": pd.DataFrame()}
+    df["sample_s"] = df.groupby("activity_id")["timestamp_parsed"].diff().dt.total_seconds()
+    df["sample_s"] = df["sample_s"].where(df["sample_s"].between(1, 30), 5).fillna(5)
+    zone_edges = [0, .60, .70, .80, .90, 2]
+    zone_names = ["Z1 · recuperación", "Z2 · aeróbico suave", "Z3 · aeróbico", "Z4 · umbral", "Z5 · anaeróbico"]
+    df["zone"] = pd.cut(df["heart_rate"] / max_hr, bins=zone_edges, labels=zone_names, right=False)
+    zones = df.groupby("zone", observed=False)["sample_s"].sum().reindex(zone_names, fill_value=0).rename("seconds").reset_index()
+    zones["minutes"] = zones["seconds"] / 60
+    zones["percent"] = zones["seconds"] / zones["seconds"].sum() * 100
+
+    df["state"] = pd.cut(
+        df["heart_rate"] / max_hr,
+        bins=[0, .80, .90, 2],
+        labels=["Aeróbico", "Transición", "Anaeróbico"],
+        right=False,
+    )
+    states = df.groupby("state", observed=False).agg(
+        seconds=("sample_s", "sum"),
+        avg_speed_kmh=("speed_kmh", "mean"),
+        median_speed_kmh=("speed_kmh", "median"),
+        avg_hr=("heart_rate", "mean"),
+        activities=("activity_id", "nunique"),
+    ).reindex(["Aeróbico", "Transición", "Anaeróbico"]).reset_index()
+    states["minutes"] = states["seconds"] / 60
+    states["avg_minutes_per_activity"] = states["minutes"] / states["activities"].replace(0, float("nan"))
+
+    drift_rows = []
+    stabilization_rows = []
+    for aid, group in df.groupby("activity_id", sort=False):
+        group = group.sort_values("timestamp_parsed").copy()
+        if len(group) < 20:
+            continue
+        midpoint = group["timestamp_parsed"].iloc[0] + (group["timestamp_parsed"].iloc[-1] - group["timestamp_parsed"].iloc[0]) / 2
+        first, second = group[group["timestamp_parsed"] < midpoint], group[group["timestamp_parsed"] >= midpoint]
+        # Compare cardiac response only inside the same speed band to avoid confusing slowing down with drift.
+        valid = group[group["speed_kmh"].between(5, 25)]
+        if len(valid) >= 20:
+            low, high = valid["speed_kmh"].quantile([.25, .75])
+            comparable = valid[valid["speed_kmh"].between(low, high)]
+            first_c, second_c = comparable[comparable["timestamp_parsed"] < midpoint], comparable[comparable["timestamp_parsed"] >= midpoint]
+            if len(first_c) >= 5 and len(second_c) >= 5:
+                drift_rows.append({
+                    "activity_id": str(aid),
+                    "first_hr": first_c["heart_rate"].mean(),
+                    "second_hr": second_c["heart_rate"].mean(),
+                    "delta_bpm": second_c["heart_rate"].mean() - first_c["heart_rate"].mean(),
+                    "speed_kmh": comparable["speed_kmh"].mean(),
+                })
+        rolling = group.set_index("timestamp_parsed")["heart_rate"].rolling("60s", min_periods=8)
+        stable = rolling.std().le(5)
+        stable_times = stable[stable].index
+        start = group["timestamp_parsed"].iloc[0]
+        stabilization_rows.append({
+            "activity_id": str(aid),
+            "seconds": (stable_times[0] - start).total_seconds() if len(stable_times) else None,
+        })
+    return {
+        "zones": zones,
+        "states": states,
+        "drift": pd.DataFrame(drift_rows),
+        "stabilization": pd.DataFrame(stabilization_rows),
+    }

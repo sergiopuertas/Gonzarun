@@ -16,30 +16,60 @@ El ZIP original se guarda en `data/strava_export.zip`. Los CSV intermedios y un 
 
 Strava suele incluir `activities.csv` y una carpeta `activities/` con archivos de actividad en su formato original, a menudo `.fit.gz`; puede haber GPX o TCX en exportaciones mixtas. Véase la guía oficial: https://support.strava.com/en-us/articles/216918437-Exporting-your-Data-and-Bulk-Export
 
-## Instalación en macOS
+## Instalación y uso local
 
-Desde Terminal, entra en esta carpeta:
+La aplicación está pensada para usarse completamente desde Streamlit. No tienes
+que copiar archivos a `data/`, descomprimir el ZIP de Strava ni preparar CSV
+manualmente. Cada usuario sube su propio ZIP desde la sección **Importar datos**.
+
+### Opción recomendada: abrir con doble clic
+
+El paquete incluye lanzadores para evitar la terminal:
+
+- **macOS:** abre `launchers/macos/Gonzarun.app`.
+- **Windows:** abre `launchers/windows/Gonzarun.vbs`.
+
+La primera vez, el lanzador crea el entorno virtual e instala las dependencias.
+Después abre el dashboard automáticamente en el navegador. Es necesario tener
+Python 3.12 o superior instalado:
+
+- [Descargar Python para macOS](https://www.python.org/downloads/macos/)
+- [Descargar Python para Windows](https://www.python.org/downloads/windows/)
+
+Una vez abierto el dashboard:
+
+1. Entra en **Importar datos**.
+2. Pulsa **Examinar archivos**.
+3. Selecciona el ZIP completo descargado de Strava.
+4. Pulsa **Procesar ZIP de Strava**.
+5. Espera a que termine la importación; las estadísticas aparecerán automáticamente.
+
+No hace falta tocar la carpeta `data/`. La aplicación la crea y gestiona
+internamente.
+
+Al principio de la aplicación encontrarás **Borrar base de datos**. Úsalo para
+eliminar las actividades y recorridos importados de este equipo y empezar de
+cero. La aplicación pide confirmación antes de borrar nada; después puedes
+subir otro ZIP desde **Importar datos**.
+
+### Uso manual para desarrollo
+
+Solo si estás desarrollando la aplicación, puedes iniciar Streamlit desde una
+terminal:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env  # solo si todavía no existe .env
+python -m pip install -r requirements.txt
+streamlit run app.py
 ```
 
-Si el archivo `.env` ya existe, no hace falta sustituirlo; comprueba que contenga al menos:
+En Windows PowerShell, el equivalente es:
 
-```dotenv
-STRAVA_ZIP_PATH=data/strava_export.zip
-ACTIVITIES_CSV=data/processed/activities.csv
-POINTS_CSV=data/processed/activity_points.csv
-DATABASE_URL=
-```
-
-Arranca el dashboard:
-
-```bash
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
@@ -61,39 +91,6 @@ El archivo `gonzarun_dashboard_app.zip` se crea junto a la carpeta del proyecto.
 El paquete no contiene datos personales del exportador original.
 
 En la sección **Importar datos**, elige el ZIP que descargaste de Strava y pulsa **Procesar ZIP de Strava**. La aplicación conserva una copia en `data/strava_export.zip`, procesa el archivo dentro de la propia app y refresca las estadísticas automáticamente. Los ZIP grandes pueden tardar varios minutos. El límite de subida de Streamlit se ha elevado a 2 GB en `.streamlit/config.toml`; el límite real también depende de la memoria disponible en el equipo.
-
-## Procesamiento por terminal
-
-También puedes colocar el archivo ZIP en `data/strava_export.zip` y ejecutar:
-
-```bash
-source .venv/bin/activate
-python -m running_dashboard.ingest --zip data/strava_export.zip
-```
-
-Forzar que se vuelva a procesar el ZIP y se reimporten los datos:
-
-```bash
-python -m running_dashboard.ingest --zip data/strava_export.zip --force
-```
-
-Si ya dispones de los CSV procesados y solo quieres importar esos archivos, usa:
-
-```bash
-python -m running_dashboard.ingest --csv-only \
-  --activities data/processed/activities.csv \
-  --points data/processed/activity_points.csv
-```
-
-## Actualización periódica desacoplada
-
-La actualización automática no puede pedir por sí sola una nueva exportación a Strava: hay que descargar un ZIP nuevo desde Strava y reemplazar el archivo guardado. Una vez actualizado `data/strava_export.zip`, el importador puede programarse sin abrir Streamlit. Ejemplo de `cron` diario a las 06:00:
-
-```cron
-0 6 * * * /RUTA/ABSOLUTA/gonzarun_dashboard/scripts/refresh_db.sh >> /RUTA/ABSOLUTA/gonzarun_dashboard/data/ingest.log 2>&1
-```
-
-Si el ZIP no ha cambiado, un hash SHA-256 permite saltarse la extracción y conversión de tracks. Si cambia, se reconstruyen los CSV normalizados y se sincroniza la base de datos. El dashboard sigue siendo un proceso independiente.
 
 ## Base de datos
 
@@ -118,6 +115,7 @@ Los campos que no existan en el archivo original se dejan vacíos. No se infiere
 
 - Resumen: volumen, duración, desnivel, ritmo, frecuencia cardíaca, calorías y esfuerzo relativo.
 - Evolución: volumen semanal/mensual, consistencia y tendencias.
+- Fisiología: selector por nombre y fecha que solo muestra recorridos con muestras válidas de frecuencia cardíaca, tiempo por zona, velocidad en estados aeróbico y anaeróbico, duración media por estado, deriva cardíaca a velocidad comparable y tiempo estimado de estabilización de la FC.
 - Récords: mejores actividades y segmentos GPS cuando hay distancia acumulada y marcas de tiempo suficientes.
 - Explorador GPS: selector por nombre y fecha, recorrido en mapa, mapa de altitud, perfil de elevación e inspección de steps con marcadores espaciados por defecto.
 - Datos: tabla de actividades y métricas disponibles.
