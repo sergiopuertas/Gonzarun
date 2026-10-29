@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import folium
@@ -23,6 +21,8 @@ from running_dashboard.analytics import (
 from running_dashboard.db import (
     PROJECT_ROOT, activities, activity_points, get_engine, get_table_df, init_db,
 )
+from running_dashboard.ingest import run_import
+from running_dashboard.strava_zip import prepare_strava_zip
 
 load_dotenv(PROJECT_ROOT / ".env")
 STRAVA_ZIP_PATH = Path(os.getenv("STRAVA_ZIP_PATH", str(PROJECT_ROOT / "data" / "strava_export.zip"))).expanduser()
@@ -216,21 +216,44 @@ def metric_rows(df: pd.DataFrame) -> dict:
     }
 
 
-def _run_import_command(command: list[str], label: str) -> None:
+def _import_zip_in_app(zip_path: Path, label: str) -> None:
     with st.status(label, expanded=True) as status:
         try:
-            result = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=3600)
-            if result.returncode == 0:
-                st.code(result.stdout[-7000:] or "Importación completada.")
-                st.cache_data.clear()
-                status.update(label="Sincronización completada", state="complete")
-                st.rerun()
-            else:
-                st.error(result.stderr[-7000:] or result.stdout[-7000:] or "Falló la importación.")
-                status.update(label="Error durante la sincronización", state="error")
-        except subprocess.TimeoutExpired:
-            st.error("La importación ha superado una hora. Puedes ejecutarla directamente desde el terminal para ver el progreso.")
-            status.update(label="Tiempo de espera agotado", state="error")
+            st.write("Leyendo el ZIP y buscando actividades y recorridos GPS…")
+            prepared = prepare_strava_zip(zip_path, force=True)
+            result = run_import(
+                Path(prepared["activities_csv"]),
+                Path(prepared["points_csv"]),
+                force=True,
+            )
+            st.write(
+                f"{result['activities_imported']:,} actividades y "
+                f"{result['points_imported']:,} puntos GPS importados.".replace(",", ".")
+            )
+            if prepared.get("errors"):
+                st.warning(f"Se han omitido {len(prepared['errors'])} archivos de track con errores.")
+            st.cache_data.clear()
+            status.update(label="Sincronización completada", state="complete")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No se ha podido completar la importación: {exc}")
+            status.update(label="Error durante la sincronización", state="error")
+
+
+def _import_csv_in_app() -> None:
+    with st.status("Importando CSV existentes…", expanded=True) as status:
+        try:
+            result = run_import(ACTIVITIES_CSV, POINTS_CSV, force=True)
+            st.write(
+                f"{result['activities_imported']:,} actividades y "
+                f"{result['points_imported']:,} puntos GPS importados.".replace(",", ".")
+            )
+            st.cache_data.clear()
+            status.update(label="Sincronización completada", state="complete")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No se ha podido completar la importación: {exc}")
+            status.update(label="Error durante la sincronización", state="error")
 
 
 def render_ingest() -> None:
@@ -254,16 +277,16 @@ def render_ingest() -> None:
             STRAVA_ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
             with STRAVA_ZIP_PATH.open("wb") as target:
                 target.write(uploaded_zip.getvalue())
-            _run_import_command(
-                [sys.executable, "-m", "running_dashboard.ingest", "--zip", str(STRAVA_ZIP_PATH)],
+            _import_zip_in_app(
+                STRAVA_ZIP_PATH,
                 "Procesando el ZIP completo de Strava…",
             )
 
         if STRAVA_ZIP_PATH.exists():
             st.caption(f"ZIP guardado: `{STRAVA_ZIP_PATH}`")
             if st.button("↻ Actualizar desde el ZIP guardado", use_container_width=True, key="refresh_saved_zip"):
-                _run_import_command(
-                    [sys.executable, "-m", "running_dashboard.ingest", "--zip", str(STRAVA_ZIP_PATH)],
+                _import_zip_in_app(
+                    STRAVA_ZIP_PATH,
                     "Actualizando desde el ZIP guardado…",
                 )
         else:
@@ -276,19 +299,7 @@ def render_ingest() -> None:
         st.caption("Usa esta opción solo si ya generaste manualmente los CSV.")
         st.code(f"activities: {ACTIVITIES_CSV}\npuntos GPS: {POINTS_CSV}", language="text")
         if st.button("Importar CSV existentes", use_container_width=True, key="sync_existing_csv"):
-            _run_import_command(
-                [
-                    sys.executable,
-                    "-m",
-                    "running_dashboard.ingest",
-                    "--csv-only",
-                    "--activities",
-                    str(ACTIVITIES_CSV),
-                    "--points",
-                    str(POINTS_CSV),
-                ],
-                "Importando CSV existentes…",
-            )
+            _import_csv_in_app()
 
 
 def render_summary(df: pd.DataFrame, summary: dict) -> None:

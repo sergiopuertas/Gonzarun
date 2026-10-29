@@ -60,7 +60,7 @@ El archivo `gonzarun_dashboard_app.zip` se crea junto a la carpeta del proyecto.
 
 El paquete no contiene datos personales del exportador original.
 
-En la barra lateral, elige el ZIP que descargaste de Strava y pulsa **Procesar ZIP de Strava**. La aplicación conserva una copia en `data/strava_export.zip` y lanza el importador en un proceso separado. Los ZIP grandes pueden tardar varios minutos. El límite de subida de Streamlit se ha elevado a 2 GB en `.streamlit/config.toml`; el límite real también depende de la memoria disponible en el equipo.
+En la sección **Importar datos**, elige el ZIP que descargaste de Strava y pulsa **Procesar ZIP de Strava**. La aplicación conserva una copia en `data/strava_export.zip`, procesa el archivo dentro de la propia app y refresca las estadísticas automáticamente. Los ZIP grandes pueden tardar varios minutos. El límite de subida de Streamlit se ha elevado a 2 GB en `.streamlit/config.toml`; el límite real también depende de la memoria disponible en el equipo.
 
 ## Procesamiento por terminal
 
